@@ -82,10 +82,8 @@ def get_sampler_H_from_parser(parser):
     H = HparamsBinaryAE(dataset)
     H.vqgan_batch_size = H.batch_size  # used for generating samples and latents
 
-    if parser_args.sampler == "bld":
-        H_sampler = HparamsBianryLatent(dataset)
-    else:
-        raise NotImplementedError
+    H_sampler = HparamsBianryLatent(dataset)
+    
     H.update(H_sampler)  # overwrites old (vqgan) H.batch_size
     H = apply_parser_values_to_H(H, parser_args)
     return H

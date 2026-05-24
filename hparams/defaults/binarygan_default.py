@@ -163,3 +163,5 @@ def add_vqgan_args(parser):
     parser.add_argument('--deterministic', action="store_true")
     parser.add_argument('--cp_data', action="store_true")
     parser.add_argument('--root_path', type=str)
+    parser.add_argument('--snr', type=int)
+    parser.add_argument("--qam_order", type=int)

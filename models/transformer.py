@@ -75,6 +75,12 @@ class Transformer(nn.Module):
         return logits
 
 class TransformerBD(nn.Module):
+    """Transformer denoiser for binary diffusion.
+
+    time_cond_mode:
+      - 'token' (default, legacy): single time token appended to sequence
+      - 'adaln': DiT-style per-block Adaptive Layer Normalization
+    """
 
     def __init__(self, H, avg_pooling=False):
         super().__init__()
@@ -84,14 +90,17 @@ class TransformerBD(nn.Module):
         self.block_size = H.block_size
         self.n_layers = H.bert_n_layers
         self.codebook_size = H.codebook_size
+        self.sample_steps = H.sample_steps
+        self.time_cond_mode = getattr(H, 'time_cond_mode', 'token')
 
         self.tok_emb = nn.Embedding(self.vocab_size, self.n_embd)
         self.tok_emb.weight.data.normal_(0.0, 0.02)
-        
-        self.drop = nn.Dropout(H.embd_pdrop)
 
-        # transformer
-        block_type = Block
+        self.drop = nn.Dropout(H.embd_pdrop)
+        self.pos_emb = nn.Parameter(
+            torch.Tensor(get_2d_sincos_pos_embed(self.n_embd, H.latent_shape[-1])).unsqueeze(0)
+        )
+
         dpr = [x.item() for x in torch.linspace(0, H.drop_path, self.n_layers)]
 
         self.exp_type = 'unconditional'
@@ -100,22 +109,26 @@ class TransformerBD(nn.Module):
             self.exp_type = 't2i_tkn'
         if H.cross and H.dataset.startswith('laion'):
             self.exp_type = 't2i_cross'
-            block_type = CrossBlock
         if H.dataset.startswith('imagenet'):
             self.cls_embedding = nn.Embedding(H.num_classes, self.n_embd)
             self.exp_type = 'class_tkn'
 
-        self.blocks = nn.Sequential(*[block_type(H, dpr[i]) for i in range(self.n_layers)])
+        if self.time_cond_mode == 'adaln':
+            from .transformer_utils import TimestepMLP, BlockAdaLN
+            self.t_embed = TimestepMLP(self.n_embd, self.sample_steps)
+            self.blocks = nn.ModuleList([
+                BlockAdaLN(H, dpr[i]) for i in range(self.n_layers)
+            ])
+        else:
+            self.time_step_embedding = AdaTkn_Time(self.n_embd, self.sample_steps)
+            block_type = Block
+            if self.exp_type == 't2i_cross':
+                block_type = CrossBlock
+            self.blocks = nn.Sequential(*[block_type(H, dpr[i]) for i in range(self.n_layers)])
 
         # decoder head
         self.ln_f = nn.LayerNorm(self.n_embd)
         self.head = nn.Linear(self.n_embd, self.codebook_size, bias=True)
-
-        self.sample_steps = H.sample_steps
-
-        self.time_step_embedding = AdaTkn_Time(self.n_embd, self.sample_steps)
-
-        self.pos_emb = nn.Parameter(torch.Tensor(get_2d_sincos_pos_embed(self.n_embd, H.latent_shape[-1])).unsqueeze(0))
 
     def get_block_size(self):
         return self.block_size
@@ -128,45 +141,37 @@ class TransformerBD(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
-    
-    def forward(self, idx, label=None, time_steps=None,):
-        # pdb.set_trace()
-        # each index maps to a (learnable) vector
-        # token_embeddings = self.tok_emb(idx)
+
+    def forward(self, idx, label=None, time_steps=None):
         if idx.shape[1] == 0:
             token_embeddings = torch.zeros(idx.shape[0], 0, self.n_embd).to('cuda')
         else:
-            # token_embeddings = (idx*1.0) @ self.tok_emb.weight #/ float(self.n_embd)
-            token_embeddings = (idx*1.0 - 0.5) * 2.0 @ self.tok_emb.weight #/ float(self.n_embd)
+            token_embeddings = (idx * 1.0 - 0.5) * 2.0 @ self.tok_emb.weight
 
         t = token_embeddings.shape[1]
-
         position_embeddings = self.pos_emb[:, :t, :]
+        x = self.drop(token_embeddings + position_embeddings)
 
-        x = token_embeddings + position_embeddings
-
-        time_tkn = True
-        # time_tkn = False
-        time_emb = self.time_step_embedding(time_steps)
-        if time_tkn:
-            x = torch.cat([x, time_emb], 1)
+        if self.time_cond_mode == 'adaln':
+            c = self.t_embed(time_steps)  # [B, 6*n_embd]
+            for block in self.blocks:
+                x = block(x, c)
+            x = x[:, :self.block_size, :]
         else:
-            x = x + time_emb
+            time_emb = self.time_step_embedding(time_steps)
+            x = torch.cat([x, time_emb], 1)
 
-        if self.exp_type.endswith('tkn') and label != None:
-            # pdb.set_trace()
-            cls_emb = self.cls_embedding(label).unsqueeze(1)
-            # x = x + cls_emb
-            x = torch.cat([x, cls_emb], 1)
+            if self.exp_type.endswith('tkn') and label is not None:
+                cls_emb = self.cls_embedding(label).unsqueeze(1)
+                x = torch.cat([x, cls_emb], 1)
 
-        x = self.drop(x)
-        for i, block in enumerate(self.blocks):
-            if self.exp_type == 't2i_cross':
-                x = block(x, label)
-            else:
-                x = block(x)
+            for block in self.blocks:
+                if self.exp_type == 't2i_cross':
+                    x = block(x, label)
+                else:
+                    x = block(x)
+            x = x[:, :self.block_size, :]
 
-        x = x[:, :self.block_size, :]
         logits = self.head(self.ln_f(x))
         return logits
 

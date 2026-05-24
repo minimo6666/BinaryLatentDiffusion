@@ -10,6 +10,7 @@ import pdb
 import numpy as np 
 import misc
 import time
+from utils.qam_utils import *
 
 def get_sampler(H, embedding_weight):
 
@@ -18,6 +19,18 @@ def get_sampler(H, embedding_weight):
         print(denoise_fn)
         sampler = BinaryDiffusion(
             H, denoise_fn, H.codebook_size, embedding_weight)
+        
+    if H.sampler == 'bld_dsc':
+        from models.binarylatent_dsc import BinaryDiffusionDSC
+        denoise_fn = TransformerBD(H).cuda()
+        sampler = BinaryDiffusionDSC(
+            H, denoise_fn, H.codebook_size)
+        
+        print(denoise_fn)
+        total_params = sum(p.numel() for p in denoise_fn.parameters())
+        total_params_million = total_params / 1_000_000
+        print(f"总参数量: {total_params_million:.2f} million")
+        
     else:
         raise NotImplementedError
 
@@ -240,6 +253,118 @@ def get_online_samples(H, generator, sampler, x=None,):
         images = torch.cat(images, 0)
 
     return images
+
+
+@torch.no_grad()
+def get_online_samples_with_shape(H, generator, sampler, x=None, shape=None):
+
+    if x is None:
+        latents_all = []
+
+        sampler.eval()
+
+        print('Sampling')
+        for t in np.linspace(0.55, 1.0, num=10):
+            latents = sampler.sample(sample_steps=H.sample_steps, temp=t, shape=shape)
+            latents_all.append(latents)
+        latents = torch.cat(latents_all, dim=0)
+        sampler.train()
+
+    else:
+        latents = x
+
+    print('Sampling done')
+
+    with torch.cuda.amp.autocast():
+        # latents_one_hot = latent_ids_to_onehot(latents, H.latent_shape, H.codebook_size)
+        size = min(5, latents.shape[0])
+        images = []
+        for i in range(len(latents)//size):
+            latent = latents[i*size : (i+1)*size]
+
+            latent = (latent * 1.0) 
+
+            if H.use_tanh:
+                latent = (latent - 0.5) * 2.0
+
+            if not H.norm_first:
+                latent = latent / float(H.codebook_size)
+
+            latent = latent.permute(0,2,1)
+            latent = latent.reshape(*latent.shape[:-1], H.latent_shape[1], H.latent_shape[2])
+            img, _, _ = generator(None, code=latent.float())
+            images.append(img)
+        images = torch.cat(images, 0)
+
+    return images
+
+@torch.no_grad()
+def get_online_samples_with_noisy_code(H, generator, sampler, x_noisy_code=None, noise_t=63):
+
+    latents_all = []
+
+    sampler.eval()
+
+    print('Sampling')
+ 
+    latents = sampler.sample(x_noisy_code, noise_t)
+
+    latents_all.append(latents)
+    latents = torch.cat(latents_all, dim=0)
+    sampler.train()
+
+
+    print('Sampling done')
+
+    with torch.cuda.amp.autocast():
+        # latents_one_hot = latent_ids_to_onehot(latents, H.latent_shape, H.codebook_size)
+        size = latents.shape[0]
+        images = []
+        for i in range(len(latents)//size):
+            latent = latents[i*size : (i+1)*size]
+
+            latent = (latent * 1.0) 
+
+            if H.use_tanh:
+                latent = (latent - 0.5) * 2.0
+
+            if not H.norm_first:
+                latent = latent / float(H.codebook_size)
+
+            latent = latent.permute(0,2,1)
+            latent = latent.reshape(*latent.shape[:-1], H.latent_shape[1], H.latent_shape[2])
+            img, _, _ = generator(None, code=latent.float())
+            images.append(img)
+        images = torch.cat(images, 0)
+
+    return images
+
+@torch.no_grad()
+def get_online_samples_denoise_code(sampler, x_noisy_code=None, noise_t=63):
+
+    sampler.eval()
+ 
+    denoised_code = sampler.sample(x_noisy_code, noise_t)
+
+    sampler.train()
+
+    return denoised_code
+
+@torch.no_grad()
+def get_online_decode_code_into_images(latent, generator, H):
+        latent = (latent * 1.0) 
+
+        if H.use_tanh:
+            latent = (latent - 0.5) * 2.0
+
+        if not H.norm_first:
+            latent = latent / float(H.codebook_size)
+
+        latent = latent.permute(0,2,1)
+        latent = latent.reshape(*latent.shape[:-1], H.latent_shape[1], H.latent_shape[2])
+        img, _, _ = generator(None, code=latent.float())
+        return img
+
 
 @torch.no_grad()
 def get_t2i_samples_guidance_test(H, generator, sampler, label, x=None, g=None, t=1.0, return_latent=False):

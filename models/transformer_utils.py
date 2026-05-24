@@ -178,6 +178,74 @@ class CrossBlock(nn.Module):
         x = x + self.drop_path(self.gamma_2 * self.mlp(self.ln2(x)))
         return x
 
+
+# ==============================================================================
+# AdaLN (Adaptive Layer Normalization) modules — DiT-style time conditioning
+# Replaces the weak single-token time conditioning with per-block modulation.
+# ==============================================================================
+
+class TimestepMLP(nn.Module):
+    """Project sinusoidal time embedding into per-block modulation parameters.
+
+    Each BlockAdaLN block receives a slice of [6 * n_embd]:
+      shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp
+    """
+    def __init__(self, n_embd, diffusion_step):
+        super().__init__()
+        self.emb = SinusoidalPosEmb(diffusion_step, n_embd)
+        self.mlp = nn.Sequential(
+            nn.Linear(n_embd, n_embd * 4),
+            nn.SiLU(),
+            nn.Linear(n_embd * 4, n_embd * 6),
+        )
+
+    def forward(self, t):
+        return self.mlp(self.emb(t))  # [B, 6*n_embd]
+
+
+class BlockAdaLN(nn.Module):
+    """Transformer block with Adaptive Layer Normalization (DiT-style).
+
+    Time condition c is injected as scale/shift/gate for BOTH the attention
+    and MLP sublayers. This gives every block direct awareness of the current
+    SNR/timestep, removing the single-token information bottleneck.
+    """
+    def __init__(self, H, drop_path=0.0):
+        super().__init__()
+
+        self.ln1 = nn.LayerNorm(H.bert_n_emb, elementwise_affine=False)
+        self.ln2 = nn.LayerNorm(H.bert_n_emb, elementwise_affine=False)
+        self.attn = Attention(H)
+        self.mlp = nn.Sequential(
+            nn.Linear(H.bert_n_emb, 4 * H.bert_n_emb),
+            act(),
+            nn.Linear(4 * H.bert_n_emb, H.bert_n_emb),
+            nn.Dropout(H.resid_pdrop),
+        )
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        # Maps time embedding → (shift, scale, gate) × 2 sublayers
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(H.bert_n_emb, 6 * H.bert_n_emb, bias=True)
+        )
+
+    def forward(self, x, c):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = \
+            self.adaLN_modulation(c).chunk(6, dim=1)
+
+        # Attention sublayer
+        x_norm = self.ln1(x)
+        x_norm = x_norm * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
+        x = x + gate_msa.unsqueeze(1) * self.drop_path(self.attn(x_norm))
+
+        # MLP sublayer
+        x_norm = self.ln2(x)
+        x_norm = x_norm * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)
+        x = x + gate_mlp.unsqueeze(1) * self.drop_path(self.mlp(x_norm))
+
+        return x
+
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
     """
     grid_size: int of the grid height and width
