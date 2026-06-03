@@ -61,6 +61,15 @@ class HparamsBianryLatent(HparamsBase):
             self.num_classes = 1000
         
 
+        elif self.dataset == "ffhq":
+            self.batch_size = 32
+            self.bert_n_emb = 768
+            self.bert_n_head = 12
+            self.bert_n_layers = 24
+            self.block_size = 256
+            self.lr = 2e-4
+            self.warmup_iters = 10000
+
         else:
             raise KeyError(f"Defaults not defined for Bernoulli diffusion model on dataset: {self.dataset}")
 

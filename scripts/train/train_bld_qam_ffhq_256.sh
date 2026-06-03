@@ -2,7 +2,7 @@
 
 # 分布式训练启动命令 #gray coding support
 # 消融实验: AdaLN time conditioning (sole change vs. baseline)
-CUDA_VISIBLE_DEVICES="4" python -m torch.distributed.launch \
+CUDA_VISIBLE_DEVICES="0" python -m torch.distributed.launch \
     --nproc_per_node 1 \
     --master_port 12350 \
     --use_env \

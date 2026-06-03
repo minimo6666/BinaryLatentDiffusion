@@ -196,11 +196,11 @@ class TimestepMLP(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(n_embd, n_embd * 4),
             nn.SiLU(),
-            nn.Linear(n_embd * 4, n_embd * 6),
+            nn.Linear(n_embd * 4, n_embd),
         )
 
     def forward(self, t):
-        return self.mlp(self.emb(t))  # [B, 6*n_embd]
+        return self.mlp(self.emb(t))  # [B, n_embd]
 
 
 class BlockAdaLN(nn.Module):

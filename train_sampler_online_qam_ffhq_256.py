@@ -22,20 +22,10 @@ from ldm.ldm.util import instantiate_from_config
 from PIL import Image
 from utils.qam_utils import *
 from utils.m_qam_awgn_util import *
-from utils.llr_utils import apply_qam_channel_soft
 
-def make_code_noise(clean_code, eb_n0_db, qam_order=16, device=None, return_llr=False):
-    """Apply QAM channel noise. Optionally return soft LLR values."""
-    if return_llr:
-        noisy_bits, llr = apply_qam_channel_soft(
-            clean_code, eb_n0_db, qam_order=qam_order, device=device
-        )
-        return noisy_bits, llr
-    else:
-        received_code = make_code_noise_single(
-            clean_code, eb_n0_db=eb_n0_db, qam_order=qam_order, device=device
-        )
-        return received_code
+def make_code_noise(clean_code, eb_n0_db, qam_order=16, device=None):
+    received_code = make_code_noise_single(clean_code, eb_n0_db=eb_n0_db, qam_order=qam_order, device=device)
+    return received_code
 
 def main(H, vis):
 
@@ -308,7 +298,9 @@ def main(H, vis):
                     save_stats(H, train_stats, step)
             
             if step == H.train_steps:
-                exit()
+                if dist.get_rank() == 0:
+                    print(f"Training complete at step {step}.")
+                return
 
 
 if __name__ == '__main__':
