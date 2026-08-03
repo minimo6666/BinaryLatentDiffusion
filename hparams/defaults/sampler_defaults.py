@@ -39,7 +39,7 @@ class HparamsBianryLatent(HparamsBase):
         self.init_scale = 0
         self.optim_eps = 1e-8
         self.reset_scaler = False
-        
+
         super().__init__(dataset)
         if self.dataset == "churches" or self.dataset == "bedrooms" or self.dataset == "custom":
             self.batch_size = 128
@@ -49,7 +49,7 @@ class HparamsBianryLatent(HparamsBase):
             self.block_size = 256
             self.lr = 2e-4
             self.warmup_iters = 10000
-        
+
         elif self.dataset.startswith("laion"):
             self.batch_size = 128
             self.bert_n_emb = 768
@@ -59,7 +59,7 @@ class HparamsBianryLatent(HparamsBase):
             self.lr = 2e-4
             self.warmup_iters = 10000
             self.num_classes = 1000
-        
+
 
         elif self.dataset == "ffhq":
             self.batch_size = 32
@@ -86,7 +86,7 @@ def add_sampler_args(parser):
     parser.add_argument("--embd_pdrop", type=float)
     parser.add_argument("--resid_pdrop", type=float)
     parser.add_argument("--sample_block_size", type=int)
-    parser.add_argument("--sampler", type=str, required=True, choices=["bld", "bld_dsc"])
+    parser.add_argument("--sampler", type=str, required=True, choices=["bld", "bld_dsc", "bld_dsc_weighted", "bld_dsc_latent"])
     parser.add_argument("--total_steps", type=int)
     parser.add_argument("--sample_steps", type=int)
     parser.add_argument("--temp", type=float)

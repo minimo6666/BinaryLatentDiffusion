@@ -13,7 +13,7 @@ def extract(a, t, x_shape):
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
 
-class BinaryDiffusionDSC(nn.Module):
+class BinaryDiffusionDSCLatent(nn.Module):
     def __init__(self, H, denoise_fn, mask_id):
         super().__init__()
 
@@ -138,28 +138,41 @@ class BinaryDiffusionDSC(nn.Module):
         loss = (weight * kl_loss).mean()
 
         # =========================================================================
-        # 🌟🌟🌟 新增：Semantic-Aware Soft Loss (语义感知损失) 🌟🌟🌟
+        # 🌟🌟🌟 新方案：Latent Semantic Distance Loss (潜空间语义距离损失) 🌟🌟🌟
+        #
+        # 与像素级 MSE 方案不同：
+        #   - 不穿过脆弱的 BAE Decoder 回传梯度
+        #   - 直接在 Codebook 张成的连续潜空间中计算语义距离
+        #   - x_0 @ Q = Ground Truth 连续特征
+        #   - sigmoid(logits) @ Q = Predicted 软连续特征
+        #   - MSE 在这两个连续特征之间计算
         # =========================================================================
-        semantic_loss_val = 0.0
-        if ae is not None and gt_img is not None:
-            # 1. 获取网络预测的软概率 Soft Probabilities (0 ~ 1) [B, 256, 64]
-            soft_x_0 = torch.sigmoid(x_0_hat_logits)
+        latent_loss_val = 0.0
+        if ae is not None:
+            with torch.no_grad():
+                # 提取冻结的 BAE 码本权重, shape: [codebook_size, emb_dim] (例如 [64, 256])
+                codebook = ae.quantize.embed.weight
 
-            # 2. 将其重新排列为 BAE Decoder 期望的维度结构 [B, 64, 16, 16]
-            soft_code = soft_x_0.permute(0, 2, 1).contiguous()
-            soft_code = soft_code.reshape(b, self.codebook_size, self.shape[1], self.shape[2])
+                # 构建真实的连续特征 (Ground Truth Latent)
+                # x_0: [B, N, codebook_size], codebook: [codebook_size, D]
+                # true_latent: [B, N, D] — 完美的语义参考点
+                true_latent = torch.matmul(x_0, codebook)
 
-            # 3. 软潜变量直接通过冻结的 BAE 前向传播进行解码 (利用其矩阵乘法)
-            pred_img, _, _ = ae(None, code=soft_code)
+            # 构建预测的连续软特征 (Predicted Soft Latent)
+            # 将 logits 转为 0~1 的软概率，再进行软查表
+            soft_x_0 = torch.sigmoid(x_0_hat_logits)          # [B, N, codebook_size]
+            pred_latent = torch.matmul(soft_x_0, codebook)    # [B, N, D]
 
-            # 4. 计算重构图像与 GT 的均方误差 (MSE)
-            semantic_loss = F.mse_loss(pred_img, gt_img)
+            # 在潜空间计算连续特征的 MSE 距离
+            # 连续空间的能量差异能很好地反映语义偏差
+            latent_loss = F.mse_loss(pred_latent, true_latent)
 
-            # 5. 联合优化：lambda_sem 可调，推荐 1.0 - 5.0，逼迫 Diffusion 死保高权位 bit
-            lambda_sem = 1.0
-            loss = loss + lambda_sem * semantic_loss
+            # 联合损失权重超参数 (可调: 0.1 ~ 1.0)
+            lambda_latent = 0.5
 
-            semantic_loss_val = semantic_loss.item()
+            # 将 latent_loss 融入到总 loss 中
+            loss = loss + lambda_latent * latent_loss
+            latent_loss_val = latent_loss.item()
         # =========================================================================
 
         with torch.no_grad():
@@ -208,10 +221,10 @@ class BinaryDiffusionDSC(nn.Module):
             aux_loss = (weight * aux_loss).mean()
             loss = self.aux * aux_loss + loss
 
-        # 🌟🌟🌟 新增：在 Stats 中记录 semantic_loss，便于监控 🌟🌟🌟
+        # 🌟🌟🌟 在 Stats 中记录 latent_loss，便于监控 🌟🌟🌟
         stats = {'loss': loss, 'bce_loss': kl_loss_mean, 'acc': acc}
-        if ae is not None and gt_img is not None:
-            stats['semantic_loss'] = semantic_loss_val
+        if ae is not None:
+            stats['latent_loss'] = latent_loss_val
 
         if self.aux > 0:
             stats['aux loss'] = aux_loss

@@ -18,7 +18,7 @@ from utils.qam_utils import Eb_No_dB_to_sigma_in_M_QAM, qam_constellation, mappi
 
 def get_image_from_binary_code(generator,  binary_code = None, embedding_weight = None):  # 4月七号测试实值DDPM，即不走输入01code那一套了
     generator.eval()
-   
+
     binary_latent_code = binary_code
     print("latents shape:")
     print(binary_latent_code.shape)
@@ -34,7 +34,7 @@ def get_image_from_binary_code(generator,  binary_code = None, embedding_weight 
         for i in range(len(binary_latent_code)//size):
             latent = binary_latent_code[i*size : (i+1)*size]
 
-            latent = (latent * 1.0) 
+            latent = (latent * 1.0)
 
             if use_tanh:
                 latent = (latent - 0.5) * 2.0
@@ -72,15 +72,15 @@ class BinaryQuantizerWithoutSampler(nn.Module):
         if self.use_tanh:
             x = x * 0.5 + 0.5
             if deterministic:
-                x = (x > 0.5) * 1.0 
+                x = (x > 0.5) * 1.0
             else:
                 x = torch.bernoulli(x)
             x = (x - 0.5) * 2.0
             return x
-            
+
         else:
             if deterministic:
-                x = (x > 0.5) * 1.0 
+                x = (x > 0.5) * 1.0
                 return x
             else:
                 return torch.bernoulli(x)
@@ -99,24 +99,7 @@ class BinaryQuantizerWithoutSampler(nn.Module):
         device = code.device
         #后面两个维度合并成一个维度
         shape = code.shape
-   
-        # # make x noisy and denoise 
-        # sigma_t = Eb_No_dB_to_sigma_in_M_QAM(torch.tensor(self.H.snr), self.H.qam_order).to(device)
 
-        # code_flatten = code.flatten()
-
-        # constellation = qam_constellation(self.H.qam_order).to(device)
-    
-        # # Map binary data to QAM  constellation symbols
-        # symbols = mapping(code_flatten, constellation, self.H.qam_order)
-
-        #     # Simulate AWGN channel
-        # noise = sigma_t * (torch.randn_like(symbols) + 1j * torch.randn_like(symbols))
-        
-        # received_symbols = symbols + noise
-
-        # # turn noisy constellation symbols into binary code
-        # noise_binary = demapping(received_symbols, constellation, self.H.qam_order)
 
         # ... 在主流程中添加噪声的部分修改如下 ...
 
@@ -145,11 +128,11 @@ class BinaryQuantizerWithoutSampler(nn.Module):
         noise_binary = noise_binary.view(shape)
 
         z_b = noise_binary
-        
+
 
         ##################################################
 
-        z_flow = z_b.detach() + z - z.detach() 
+        z_flow = z_b.detach() + z - z.detach()
 
         z_q = torch.einsum("b n h w, n d -> b d h w", z_flow, self.embed.weight)
         return z_q, code_book_loss, {
@@ -177,15 +160,15 @@ class BinaryQuantizer(nn.Module):
         if self.use_tanh:
             x = x * 0.5 + 0.5
             if deterministic:
-                x = (x > 0.5) * 1.0 
+                x = (x > 0.5) * 1.0
             else:
                 x = torch.bernoulli(x)
             x = (x - 0.5) * 2.0
             return x
-            
+
         else:
             if deterministic:
-                x = (x > 0.5) * 1.0 
+                x = (x > 0.5) * 1.0
                 return x
             else:
                 return torch.bernoulli(x)
@@ -229,15 +212,15 @@ class BinaryQuantizerBPSK(nn.Module):
         if self.use_tanh:
             x = x * 0.5 + 0.5
             if deterministic:
-                x = (x > 0.5) * 1.0 
+                x = (x > 0.5) * 1.0
             else:
                 x = torch.bernoulli(x)
             x = (x - 0.5) * 2.0
             return x
-            
+
         else:
             if deterministic:
-                x = (x > 0.5) * 1.0 
+                x = (x > 0.5) * 1.0
                 return x
             else:
                 return torch.bernoulli(x)
@@ -261,13 +244,13 @@ class BinaryQuantizerBPSK(nn.Module):
             z_b = z_b.view(z_b.size(0), z_b.size(1), -1)
             #最后两个维度换一下顺序
             z_b = z_b.permute(0, 2, 1)
-            
+
 
             t = sampler.sample_time_joint_train(device)
 
             z_b_noise = sampler.bpsk_noise_sheduler_x0_xt(z_b, t)
             noise_latent_t = [z_b_noise,t,z_b]
-         
+
             z_b_denoise = sampler.p_sample_loop_train(noise_latent_t = noise_latent_t)
 
 
@@ -278,30 +261,30 @@ class BinaryQuantizerBPSK(nn.Module):
              # Cloning tensors for autograd
             # z_b_denoise_clone = z_b_denoise.clone().float()
             # z_b_clone = z_b.clone().float()
-            
+
             # Computing the loss
 #             diffusion_kl_loss = F.binary_cross_entropy_with_logits(z_b_denoise_clone, z_b_clone, reduction='none')
-        
+
 #             diffusion_kl_loss = diffusion_kl_loss.mean()
             ######################
-            
-    
+
+
             # #存一张图下来看看 待会删掉
             from utils.log_utils import save_results_modified
             removed_noise_image = get_image_from_binary_code(generator, binary_code = z_b_denoise, embedding_weight = self.embed.weight)
             save_results_modified(removed_noise_image, f'steps_{t}', 8500, "experiments/train_logs/jointly_train_decode_only_snr_-10", True,0,0)
-  
 
-            
+
+
             z_b_denoise = z_b_denoise.permute(0, 2, 1)
             last_two_dim = int(math.sqrt(z_b_denoise.size(2)))
             z_b_denoise = z_b_denoise.view(z_b_denoise.size(0), z_b_denoise.size(1), last_two_dim, last_two_dim)
-            
+
             #训bpsk代码
             z_flow = z_b_denoise.detach() + z - z.detach()
         else:
              #原代码，保留在这，后面要是采样还要恢复回去,联合BLD训练的时候不用它
-            z_flow = z_b.detach() + z - z.detach() 
+            z_flow = z_b.detach() + z - z.detach()
 
         z_q = torch.einsum("b n h w, n d -> b d h w", z_flow, self.embed.weight)
         return z_q, code_book_loss, {
@@ -554,7 +537,7 @@ class BinaryAutoEncoder(nn.Module):
         self.generator = Generator(H)
         self.quantize = BinaryQuantizerWithoutSampler(self.codebook_size, self.embed_dim, self.embed_dim, use_tanh=H.use_tanh, H=H)
         self.mode = H.mode
-    
+
 
         # print(self.encoder)
         # print(self.quantize)
@@ -567,7 +550,7 @@ class BinaryAutoEncoder(nn.Module):
             if code_only:
                 return binary
         else:
-            #用 0 1的code去选实数的code  [Batch,256，64] * [Batch,64,256] = [Batch,256,256]  后面会再转化为-> [Batch,256,16 ,16] 
+            #用 0 1的code去选实数的code  [Batch,256，64] * [Batch,64,256] = [Batch,256,256]  后面会再转化为-> [Batch,256,16 ,16]
             quant = torch.einsum("b n h w, n d -> b d h w", code, self.quantize.embed.weight)
             codebook_loss, quant_stats = None, None
         x = self.generator(quant)
@@ -620,9 +603,9 @@ class BinaryGAN(nn.Module):
 
         if dist.get_rank() == 0:
             self.perceptual = lpips.LPIPS(net="vgg")
-        
+
         dist.barrier()
-        
+
         self.perceptual = lpips.LPIPS(net="vgg")
         self.perceptual_weight = H.perceptual_weight
         self.disc_start_step = H.disc_start_step
@@ -631,11 +614,11 @@ class BinaryGAN(nn.Module):
         self.policy = "color,translation"
 
         self.code_weight = H.code_weight
-    
+
 
     def forward(self, x, step):
         return self.train_iter(x, step)
-        
+
     def train_iter(self, x, step):
         stats = {}
 
@@ -673,7 +656,7 @@ class BinaryGAN(nn.Module):
 
         if "mean_distance" in stats:
             stats["mean_code_distance"] = quant_stats["mean_distance"].item()
-        
+
 
         if self.diff_aug:
             x_hat = x_hat_pre_aug
@@ -720,7 +703,7 @@ class BinaryGAN(nn.Module):
         stats["latent_ids"] = quant_stats["binary_code"]
 
         return x_hat, stats
-    
+
 #ae with sampler
 class BinaryAutoEncoderBPSK(nn.Module):
     def __init__(self, H):
@@ -750,7 +733,7 @@ class BinaryAutoEncoderBPSK(nn.Module):
         self.generator = Generator(H)
         self.quantize = BinaryQuantizerBPSK(self.codebook_size, self.embed_dim, self.embed_dim, use_tanh=H.use_tanh)
         self.mode = H.mode
-    
+
         from hparams import get_sampler_hparams_bpsk
         from utils.sampler_utils import get_sampler
         from utils.log_utils import load_model_directly
@@ -768,8 +751,8 @@ class BinaryAutoEncoderBPSK(nn.Module):
                     print("sampler_created!")
                 except Exception:
                     print("No EMA model found, starting EMA from model load point")
-        
-                 
+
+
         # print(self.encoder)
         # print(self.quantize)
         # print(self.generator)
@@ -782,7 +765,7 @@ class BinaryAutoEncoderBPSK(nn.Module):
             if code_only:
                 return binary
         else:
-            #用 0 1的code去选实数的code  [Batch,256，64] * [Batch,64,256] = [Batch,256,256]  后面会再转化为-> [Batch,256,16 ,16] 
+            #用 0 1的code去选实数的code  [Batch,256，64] * [Batch,64,256] = [Batch,256,256]  后面会再转化为-> [Batch,256,16 ,16]
             quant = torch.einsum("b n h w, n d -> b d h w", code, self.quantize.embed.weight)
             codebook_loss, quant_stats = None, None
         x = self.generator(quant)
@@ -801,9 +784,9 @@ class BinaryGANBPSK(nn.Module):
 
         if dist.get_rank() == 0:
             self.perceptual = lpips.LPIPS(net="vgg")
-        
+
         dist.barrier()
-        
+
         self.perceptual = lpips.LPIPS(net="vgg")
         self.perceptual_weight = H.perceptual_weight
         self.disc_start_step = H.disc_start_step
@@ -812,16 +795,16 @@ class BinaryGANBPSK(nn.Module):
         self.policy = "color,translation"
 
         self.code_weight = H.code_weight
-    
+
 
     def forward(self, x, step):
         return self.train_iter(x, step)
-        
+
     def train_iter(self, x, step):
         stats = {}
 
         ########################  新增联合训练的diffusion_kl_loss 2024/6/14
-        
+
         x_hat, codebook_loss, quant_stats = self.ae(x)
 
         # get recon/perceptual loss
@@ -843,7 +826,7 @@ class BinaryGANBPSK(nn.Module):
         d_weight = calculate_adaptive_weight(nll_loss, g_loss, last_layer, self.disc_weight_max)
         d_weight *= adopt_weight(1, step, self.disc_start_step)
 #         loss = nll_loss + d_weight * g_loss + self.code_weight * codebook_loss
-        loss = nll_loss + d_weight * g_loss 
+        loss = nll_loss + d_weight * g_loss
 
         stats["loss"] = loss
         stats["l1"] = recon_loss.mean().item()
@@ -857,7 +840,7 @@ class BinaryGANBPSK(nn.Module):
 
         if "mean_distance" in stats:
             stats["mean_code_distance"] = quant_stats["mean_distance"].item()
-        
+
 
         if self.diff_aug:
             x_hat = x_hat_pre_aug

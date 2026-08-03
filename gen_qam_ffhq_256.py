@@ -103,12 +103,15 @@ def main(H, vis):
     qam_str = f"{H.qam_order}QAM"
     sample_model = ema_sampler if H.ema else (sampler_without_ddp if H.distributed else sampler)
 
-    # ---- 1. Save GT (clean code → decode, no channel) ----
+# =========================================================================
+    # 🌟🌟 核心修改 1：保存 GT 时，直接使用数据集里的原始原图 val_img 🌟🌟
+    # =========================================================================
     gt_dir = f"{H.log_dir}/samples_for_psnr/{qam_str}/gt_{H.load_step}"
     os.makedirs(gt_dir, exist_ok=True)
-    gt_images = get_online_decode_code_into_images(x_val, bergan, H)
-    for idx in range(len(gt_images)):
-        torchvision.utils.save_image(torch.clamp(gt_images[idx], 0, 1), f"{gt_dir}/{idx}.png")
+
+    # 直接遍历 val_img 保存，确保评估基准与 Deep JSCC 完全一致
+    for idx in range(len(val_img)):
+        torchvision.utils.save_image(torch.clamp(val_img[idx], 0, 1), f"{gt_dir}/{idx}.png")
 
     # ---- 2. For each SNR: save noisy AND denoised images ----
     for noise_t in range(63, -1, -1):
@@ -122,7 +125,6 @@ def main(H, vis):
 
         print(f"Processing SNR {eb_n0_db:.2f} dB  (step {noise_t})")
 
-        global_idx = 0
         for start_idx in range(0, num_images, H.batch_size):
             end_idx = min(start_idx + H.batch_size, num_images)
             x_batch = x_val[start_idx:end_idx]
@@ -133,14 +135,15 @@ def main(H, vis):
             # Noisy → decode
             noisy_imgs = get_online_decode_code_into_images(x_noisy, bergan, H)
             for idx in range(len(noisy_imgs)):
-                torchvision.utils.save_image(torch.clamp(noisy_imgs[idx], 0, 1), f"{noise_dir}/{global_idx}.png")
-                global_idx += 1
+                # 🌟🌟 修改 2：使用更清晰的索引逻辑，避免计算错误 🌟🌟
+                torchvision.utils.save_image(torch.clamp(noisy_imgs[idx], 0, 1), f"{noise_dir}/{start_idx + idx}.png")
 
             # Noisy → diffusion denoise → decode
             x_denoised = get_online_samples_denoise_code(sample_model, x_noisy, noise_t)
             denoised_imgs = get_online_decode_code_into_images(x_denoised, bergan, H)
             for idx in range(len(denoised_imgs)):
-                torchvision.utils.save_image(torch.clamp(denoised_imgs[idx], 0, 1), f"{denoise_dir}/{global_idx - len(noisy_imgs) + idx}.png")
+                # 🌟🌟 修改 2 续：使用同样的索引保存 Denoised 图片，确保图片一一对应 🌟🌟
+                torchvision.utils.save_image(torch.clamp(denoised_imgs[idx], 0, 1), f"{denoise_dir}/{start_idx + idx}.png")
 
     print(f"Done. Images saved to {H.log_dir}/samples_for_psnr/{qam_str}/")
 

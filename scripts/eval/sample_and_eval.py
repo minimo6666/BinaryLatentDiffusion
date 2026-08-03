@@ -1,3 +1,4 @@
+
 """
 Memory-efficient sampling + metrics + plotting for BLD_DSC QAM experiments.
 
@@ -103,11 +104,10 @@ def main():
     Eb_N0_db_range = torch.tensor([H.snr_range[0], H.snr_range[1]])
     Eb_N0_dB_value = torch.linspace(Eb_N0_db_range[1], Eb_N0_db_range[0], 64)
 
-    # Parse evaluation SNR points (comma-separated). Default: all 64 steps
+    # Parse evaluation SNR points
     eval_snrs_str = custom_args.get('eval_snrs', None)
     if eval_snrs_str is not None:
         eval_snrs = [float(x) for x in eval_snrs_str.split(',')]
-        # Map each eval SNR to the closest noise_t index
         eval_points = []
         for snr in eval_snrs:
             diff = torch.abs(Eb_N0_dB_value - snr)
@@ -177,7 +177,7 @@ def main():
         count += take
     val_img = torch.cat(val_images, dim=0)
 
-    # Encode to binary codes (batched)
+    # Encode to binary codes
     print(f"Encoding {num_images} images to binary codes (batch={proc_batch})...")
     code_val = batched_encode(bergan, val_img, device, batch_size=proc_batch)
     b, c, h, w = code_val.shape
@@ -189,9 +189,14 @@ def main():
     print("Saving GT images...")
     gt_dir = f"{result_dir}/samples_for_psnr/{qam_str}/gt_{H.load_step}"
     os.makedirs(gt_dir, exist_ok=True)
-    gt_images = batched_decode(bergan, x_val, H, device, batch_size=proc_batch)
-    for idx, img in enumerate(gt_images):
+
+    for idx, img in enumerate(val_img):
         torchvision.utils.save_image(torch.clamp(img, 0, 1), f"{gt_dir}/{idx}.png")
+
+    # =========================================================================
+    # 🌟 新增：初始化记录 BER 的字典 🌟
+    # =========================================================================
+    ber_stats = {'noisy': {}, 'denoised': {}}
 
     # ---- 2. For each SNR: save noisy AND denoised images ----
     print(f"Processing {len(eval_points)} SNR levels (batch={proc_batch})...")
@@ -203,46 +208,73 @@ def main():
         os.makedirs(noise_dir, exist_ok=True)
         os.makedirs(denoise_dir, exist_ok=True)
 
-        print(f"  SNR {eb_n0_db:.2f} dB ({idx+1}/{len(eval_points)})")
+        print(f"\n  SNR {eb_n0_db:.2f} dB ({idx+1}/{len(eval_points)})")
 
         img_idx = 0
         for start in range(0, num_images, proc_batch):
             end = min(start + proc_batch, num_images)
             x_batch = x_val[start:end].to(device)
 
-            # Add QAM noise
             x_noisy = make_code_noise(x_batch, eb_n0_db=eb_n0_db, qam_order=H.qam_order, device=device)
-
-            # Noisy → decode and save
             noisy_imgs = get_online_decode_code_into_images(x_noisy, bergan, H)
             for img in noisy_imgs:
                 torchvision.utils.save_image(torch.clamp(img, 0, 1), f"{noise_dir}/{img_idx}.png")
                 img_idx += 1
 
-        # Denoise all codes at once (latent codes are small, fits in GPU)
+        # Denoise all codes at once
         x_val_gpu = x_val.to(device)
         x_noisy_all = make_code_noise(x_val_gpu, eb_n0_db=eb_n0_db, qam_order=H.qam_order, device=device)
         x_denoised_all = batched_denoise(sample_model, x_noisy_all, noise_t, device, batch_size=proc_batch)
-        denoised_imgs = batched_decode(bergan, x_denoised_all, H, device, batch_size=proc_batch)
-        for idx, img in enumerate(denoised_imgs):
-            torchvision.utils.save_image(torch.clamp(img, 0, 1), f"{denoise_dir}/{idx}.png")
 
-        # Free GPU memory between SNR levels
+        # =========================================================================
+        # 🌟 新增：在 GPU 内存中直接进行硬件级位对比 (Bit-wise Comparison) 计算 BER 🌟
+        # =========================================================================
+        clean_bits = (x_val_gpu > 0.5).int().to(device)
+        noisy_bits = (x_noisy_all > 0.5).int().to(device)
+        denoised_bits = (x_denoised_all > 0.5).int().to(device)
+
+        n_ber = (clean_bits != noisy_bits).float().mean().item()
+        d_ber = (clean_bits != denoised_bits).float().mean().item()
+
+        ber_stats['noisy'][eb_n0_db] = n_ber
+        ber_stats['denoised'][eb_n0_db] = d_ber
+        print(f"    [BER] Noisy: {n_ber:.4e} | Denoised: {d_ber:.4e}")
+        # =========================================================================
+
+        denoised_imgs = batched_decode(bergan, x_denoised_all, H, device, batch_size=proc_batch)
+        for d_idx, img in enumerate(denoised_imgs):
+            torchvision.utils.save_image(torch.clamp(img, 0, 1), f"{denoise_dir}/{d_idx}.png")
+
         torch.cuda.empty_cache()
 
     print(f"\nImages saved to {result_dir}/samples_for_psnr/{qam_str}/")
+
+    # =========================================================================
+    # Step 2.5: Save BER metrics to txt
+    # =========================================================================
+    metrics_dir = f"{result_dir}/metrics_results/{qam_str}"
+    ber_dir = f"{metrics_dir}/ber"
+    os.makedirs(ber_dir, exist_ok=True)
+
+    with open(f"{ber_dir}/noisy_ber.txt", "w") as f:
+        for snr in sorted(ber_stats['noisy'].keys()):
+            f.write(f"{snr:.2f}_db: {ber_stats['noisy'][snr]:.6e} +/- 0.0\n")
+
+    with open(f"{ber_dir}/denoise_ber.txt", "w") as f:
+        for snr in sorted(ber_stats['denoised'].keys()):
+            f.write(f"{snr:.2f}_db: {ber_stats['denoised'][snr]:.6e} +/- 0.0\n")
+
+    print(f"Saved BER results to {ber_dir}")
 
     # =========================================================================
     # Step 3: Compute PSNR & SSIM metrics
     # =========================================================================
     print("\nComputing metrics...")
     sample_dir = f"{result_dir}/samples_for_psnr/{qam_str}"
-    metrics_dir = f"{result_dir}/metrics_results/{qam_str}"
 
     for mode in ["denoise", "noise"]:
         mode_path = os.path.join(sample_dir, mode)
         if not os.path.exists(mode_path):
-            print(f"Warning: {mode} directory not found at {mode_path}")
             continue
 
         db_folders = sorted(
@@ -259,19 +291,16 @@ def main():
             ssim_vals = []
 
             for img_name in sorted(os.listdir(db_path)):
-                if not img_name.endswith('.png'):
-                    continue
+                if not img_name.endswith('.png'): continue
+
                 db_img_path = os.path.join(db_path, img_name)
                 gt_path = os.path.join(gt_dir, img_name)
 
-                if not os.path.exists(gt_path):
-                    continue
+                if not os.path.exists(gt_path): continue
 
                 db_img = cv2.imread(db_img_path)
                 gt_img = cv2.imread(gt_path)
-
-                if db_img is None or gt_img is None:
-                    continue
+                if db_img is None or gt_img is None: continue
 
                 try:
                     p_val = psnr(gt_img, db_img, data_range=255)
@@ -285,7 +314,7 @@ def main():
                 snr_key = float(db_folder.split('_')[0])
                 psnr_results[snr_key] = (np.mean(psnr_vals), np.std(psnr_vals))
                 ssim_results[snr_key] = (np.mean(ssim_vals), np.std(ssim_vals))
-                print(f"  [{mode}] SNR={snr_key:.2f} dB: PSNR={psnr_results[snr_key][0]:.4f}, SSIM={ssim_results[snr_key][0]:.4f}")
+                print(f"  [{mode}] SNR={snr_key:.2f} dB: PSNR={psnr_results[snr_key][0]:.4f}")
 
         for metric_name, results in [("psnr", psnr_results), ("ssim", ssim_results)]:
             save_path = os.path.join(metrics_dir, mode, metric_name)
@@ -295,10 +324,9 @@ def main():
                 for snr in sorted(results.keys()):
                     mean_val, std_val = results[snr]
                     f.write(f"{snr:.2f}_db: {mean_val:.4f} +/- {std_val:.4f}\n")
-            print(f"  Saved {filepath}")
 
     # =========================================================================
-    # Step 4: Plot (including DeepJSCC baseline comparison)
+    # Step 4: Plot (Including DeepJSCC and BER)
     # =========================================================================
     print("\nGenerating plots...")
 
@@ -306,22 +334,17 @@ def main():
     jscc_train_snrs = [-15, 0, 4, 8, 25]
 
     def parse_jscc_txt(file_path):
-        """Parse JSCC psnr_summary.txt files."""
         x_data, y_data = [], []
-        if not os.path.exists(file_path):
-            return np.array([]), np.array([])
+        if not os.path.exists(file_path): return np.array([]), np.array([])
         with open(file_path, 'r') as f:
             for line in f:
                 line = line.strip().replace(',', ' ')
-                if not line or any(k in line for k in ['=', 'SNR', 'Target']):
-                    continue
+                if not line or any(k in line for k in ['=', 'SNR', 'Target']): continue
                 parts = line.split()
                 nums = []
                 for p in parts:
-                    try:
-                        nums.append(float(p))
-                    except ValueError:
-                        continue
+                    try: nums.append(float(p))
+                    except ValueError: continue
                 if len(nums) >= 2:
                     x_data.append(nums[0])
                     y_data.append(nums[-1])
@@ -332,11 +355,11 @@ def main():
 
     def read_metrics(file_path):
         snr_vals, metric_vals = [], []
+        if not os.path.exists(file_path): return np.array([]), np.array([])
         with open(file_path, 'r') as f:
             for line in f:
                 line = line.strip()
-                if not line:
-                    continue
+                if not line: continue
                 parts = line.split(': ')
                 if len(parts) >= 2:
                     snr = float(parts[0].replace('_db', ''))
@@ -354,9 +377,13 @@ def main():
     noise_psnr_snr, noise_psnr_vals = read_metrics(os.path.join(metrics_dir, "noise", "psnr", "psnr.txt"))
     noise_ssim_snr, noise_ssim_vals = read_metrics(os.path.join(metrics_dir, "noise", "ssim", "ssim.txt"))
 
-    label = "BLD_DSC (AdaLN)"
+    # Read newly saved BER metrics
+    noise_ber_snr, noise_ber_vals = read_metrics(os.path.join(metrics_dir, "ber", "noisy_ber.txt"))
+    denoise_ber_snr, denoise_ber_vals = read_metrics(os.path.join(metrics_dir, "ber", "denoise_ber.txt"))
 
-    # --- Academic-style plot: PSNR comparison with JSCC ---
+    label = "BLD_DSC (Semantic Loss)"
+
+    # --- PSNR Plot ---
     plt.rcParams.update({
         'font.size': 14, 'axes.labelsize': 16, 'axes.titlesize': 18,
         'legend.fontsize': 12, 'xtick.labelsize': 14, 'ytick.labelsize': 14,
@@ -364,28 +391,19 @@ def main():
     })
 
     fig, ax = plt.subplots(figsize=(11, 8), dpi=300)
-
     jscc_colors = ['#9467bd', '#17becf', '#2ca02c', '#ff7f0e', '#7f7f7f']
     jscc_markers = ['v', '^', '<', '>', 's']
 
-    # Plot JSCC baselines
     if jscc_dir and os.path.exists(jscc_dir):
         for idx, train_snr in enumerate(jscc_train_snrs):
             path = os.path.join(jscc_dir, f"fix_snr_{train_snr}", "psnr_summary.txt")
             x, y = parse_jscc_txt(path)
             if len(x) > 0:
                 ax.plot(x, y, linestyle='--', linewidth=1.5, marker=jscc_markers[idx],
-                        markersize=8, alpha=0.6, color=jscc_colors[idx],
-                        label=f'JSCC: {train_snr}dB')
-    else:
-        print(f"  Note: JSCC dir not found ({jscc_dir}), skipping JSCC overlay.")
+                        markersize=8, alpha=0.6, color=jscc_colors[idx], label=f'JSCC: {train_snr}dB')
 
-    # Plot Ours (denoised)
-    ours_x, ours_y = denoise_psnr_snr, denoise_psnr_vals
-    print(f"  Ours denoised PSNR: SNR {ours_x} -> {ours_y}")
-    ax.plot(ours_x, ours_y, linestyle='-', linewidth=4, marker='o',
-            markersize=10, color='#d62728', markeredgecolor='black',
-            label=label, zorder=10)
+    ax.plot(denoise_psnr_snr, denoise_psnr_vals, linestyle='-', linewidth=4, marker='o',
+            markersize=10, color='#d62728', markeredgecolor='black', label=label, zorder=10)
 
     ax.set_title('PSNR Performance across Channel SNR Range')
     ax.set_xlabel('Test Channel SNR (dB)')
@@ -399,73 +417,25 @@ def main():
     plt.savefig(os.path.join(pdf_dir, "JSCC_vs_Ours_psnr.pdf"), format='pdf', bbox_inches='tight')
     plt.close()
 
-    # --- SSIM comparison with JSCC ---
-    fig2, ax2 = plt.subplots(figsize=(11, 8), dpi=300)
+    # --- 🌟 新增：学术级对数坐标 BER 图 (BER Comparison) 🌟 ---
+    plt.figure(figsize=(10, 7), dpi=300)
 
-    if jscc_dir and os.path.exists(jscc_dir):
-        for idx, train_snr in enumerate(jscc_train_snrs):
-            path = os.path.join(jscc_dir, f"fix_snr_{train_snr}", "ssim_summary.txt")
-            x, y = parse_jscc_txt(path)
-            if len(x) > 0:
-                ax2.plot(x, y, linestyle='--', linewidth=1.5, marker=jscc_markers[idx],
-                         markersize=8, alpha=0.6, color=jscc_colors[idx],
-                         label=f'JSCC: {train_snr}dB')
+    # 对于 BER 图，通常 Y 轴采用对数缩放 (log scale)
+    plt.semilogy(noise_ber_snr, noise_ber_vals, 'r--s', linewidth=2.5, markersize=8, alpha=0.7, label=f'Noisy Input (Before Denoising)')
+    plt.semilogy(denoise_ber_snr, denoise_ber_vals, 'b-o', linewidth=3.5, markersize=10, markeredgecolor='black', label=f'{label} Denoised output', zorder=10)
 
-    ax2.plot(denoise_ssim_snr, denoise_ssim_vals, linestyle='-', linewidth=4, marker='o',
-             markersize=10, color='#d62728', markeredgecolor='black',
-             label=label, zorder=10)
-    ax2.set_title('SSIM Performance across Channel SNR Range')
-    ax2.set_xlabel('Test Channel SNR (dB)')
-    ax2.set_ylabel('Average SSIM')
-    ax2.set_xlim([-17, 27])
-    ax2.set_xticks(np.arange(-15, 25, 5))
-    ax2.legend(loc='upper left', frameon=True, shadow=True, edgecolor='black')
-    ax2.grid(True, linestyle=':', alpha=0.6)
+    plt.title('Bit Error Rate (BER) Improvement')
+    plt.xlabel('Test Channel SNR (dB)')
+    plt.ylabel('Bit Error Rate (Log Scale)')
+    plt.xlim([-17, 27])
+    plt.xticks(np.arange(-15, 25, 5))
+
+    # 限制极低的 BER 显示 (防止因为 0 误码而导致曲线断裂)
+    plt.ylim([1e-5, 1])
+    plt.legend(loc='lower left', frameon=True, shadow=True, edgecolor='black')
+    plt.grid(True, which="both", linestyle=':', alpha=0.6)
     plt.tight_layout()
-    plt.savefig(os.path.join(pdf_dir, "JSCC_vs_Ours_ssim.pdf"), format='pdf', bbox_inches='tight')
-    plt.close()
-
-    # --- Simple denoised-only PSNR + SSIM (no JSCC) ---
-    plt.rcParams.update({'font.size': 12, 'axes.labelsize': 14, 'axes.titlesize': 14,
-                         'legend.fontsize': 11, 'xtick.labelsize': 12, 'ytick.labelsize': 12})
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(denoise_psnr_snr, denoise_psnr_vals, 'b-o', linewidth=1.5, markersize=5, label=f'{label} (denoised)')
-    plt.plot(noise_psnr_snr, noise_psnr_vals, 'r-s', linewidth=1.5, markersize=5, label=f'{label} (noisy)')
-    plt.xlabel('SNR (dB)')
-    plt.ylabel('PSNR (dB)')
-    plt.title(f'PSNR vs SNR — {label}')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.5)
-    plt.tight_layout()
-    plt.savefig(os.path.join(pdf_dir, "psnr_comparison.pdf"), dpi=300, bbox_inches='tight')
-    plt.close()
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(denoise_ssim_snr, denoise_ssim_vals, 'b-o', linewidth=1.5, markersize=5, label=f'{label} (denoised)')
-    plt.plot(noise_ssim_snr, noise_ssim_vals, 'r-s', linewidth=1.5, markersize=5, label=f'{label} (noisy)')
-    plt.xlabel('SNR (dB)')
-    plt.ylabel('SSIM')
-    plt.title(f'SSIM vs SNR — {label}')
-    plt.legend()
-    plt.grid(True, linestyle='--', alpha=0.5)
-    plt.tight_layout()
-    plt.savefig(os.path.join(pdf_dir, "ssim_comparison.pdf"), dpi=300, bbox_inches='tight')
-    plt.close()
-
-    fig, (ax3, ax4) = plt.subplots(2, 1, figsize=(8, 8))
-    ax3.plot(denoise_psnr_snr, denoise_psnr_vals, 'b-o', linewidth=1.5, markersize=5)
-    ax3.set_xlabel('SNR (dB)')
-    ax3.set_ylabel('PSNR (dB)')
-    ax3.set_title(f'{label} — Denoised PSNR')
-    ax3.grid(True, linestyle='--', alpha=0.5)
-    ax4.plot(denoise_ssim_snr, denoise_ssim_vals, 'r-s', linewidth=1.5, markersize=5)
-    ax4.set_xlabel('SNR (dB)')
-    ax4.set_ylabel('SSIM')
-    ax4.set_title(f'{label} — Denoised SSIM')
-    ax4.grid(True, linestyle='--', alpha=0.5)
-    plt.tight_layout()
-    plt.savefig(os.path.join(pdf_dir, "denoise_metrics.pdf"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(pdf_dir, "BER_Improvement.pdf"), format='pdf', bbox_inches='tight')
     plt.close()
 
     print(f"\nPlots saved to {pdf_dir}/")

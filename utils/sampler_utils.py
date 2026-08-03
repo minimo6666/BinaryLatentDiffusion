@@ -7,7 +7,7 @@ from tqdm import tqdm
 from .log_utils import save_latents, log
 from models import TransformerBD, BinaryDiffusion
 import pdb
-import numpy as np 
+import numpy as np
 import misc
 import time
 from utils.qam_utils import *
@@ -19,18 +19,43 @@ def get_sampler(H, embedding_weight):
         print(denoise_fn)
         sampler = BinaryDiffusion(
             H, denoise_fn, H.codebook_size, embedding_weight)
-        
+
     if H.sampler == 'bld_dsc':
         from models.binarylatent_dsc import BinaryDiffusionDSC
         denoise_fn = TransformerBD(H).cuda()
         sampler = BinaryDiffusionDSC(
             H, denoise_fn, H.codebook_size)
-        
+
         print(denoise_fn)
         total_params = sum(p.numel() for p in denoise_fn.parameters())
         total_params_million = total_params / 1_000_000
         print(f"总参数量: {total_params_million:.2f} million")
-        
+
+    # 🌟🌟🌟 新增：加权 Loss 的 Sampler 🌟🌟🌟
+    elif H.sampler == 'bld_dsc_weighted':
+        from models.binarylatent_dsc_weighted import BinaryDiffusionDSCWeighted
+        denoise_fn = TransformerBD(H).cuda()
+        # 实例化我们刚才新建的加权模型类
+        sampler = BinaryDiffusionDSCWeighted(
+            H, denoise_fn, H.codebook_size)
+
+        print(denoise_fn)
+        total_params = sum(p.numel() for p in denoise_fn.parameters())
+        total_params_million = total_params / 1_000_000
+        print(f"总参数量 (Weighted): {total_params_million:.2f} million")
+
+    # 🌟🌟🌟 新增：Latent Semantic Distance Loss 的 Sampler 🌟🌟🌟
+    elif H.sampler == 'bld_dsc_latent':
+        from models.binarylatent_dsc_latent import BinaryDiffusionDSCLatent
+        denoise_fn = TransformerBD(H).cuda()
+        sampler = BinaryDiffusionDSCLatent(
+            H, denoise_fn, H.codebook_size)
+
+        print(denoise_fn)
+        total_params = sum(p.numel() for p in denoise_fn.parameters())
+        total_params_million = total_params / 1_000_000
+        print(f"总参数量 (Latent Semantic): {total_params_million:.2f} million")
+
     else:
         raise NotImplementedError
 
@@ -70,7 +95,7 @@ def get_samples_temp(H, generator, sampler, x=None, ee=False):
         for i in range(len(latents)//size):
             latent = latents[i*size : (i+1)*size]
 
-            latent = (latent * 1.0) 
+            latent = (latent * 1.0)
 
             if H.use_tanh:
                 latent = (latent - 0.5) * 2.0
@@ -91,7 +116,7 @@ def get_samples_test(H, generator, sampler, x=None, t=1.0, n_samples=20, return_
     generator.eval()
     sampler.eval()
     latents = sampler.sample(sample_steps=H.sample_steps, temp=t, b=n_samples, return_all=return_all, label=label, mask=mask, guidance=guidance)
-    
+
 
     if mask is not None:
         latents = torch.cat([mask['latent'].unsqueeze(0), latents], 0)
@@ -104,7 +129,7 @@ def get_samples_test(H, generator, sampler, x=None, t=1.0, n_samples=20, return_
         for i in range(len(latents)//size):
             latent = latents[i*size : (i+1)*size]
 
-            latent = (latent * 1.0) 
+            latent = (latent * 1.0)
 
             if H.use_tanh:
                 latent = (latent - 0.5) * 2.0
@@ -132,7 +157,7 @@ def get_samples_guidance(H, generator, sampler, x=None):
         for g in [None, 0.1, 0.5, 1.0, 2.0, 5.0]:
             for t in [0.5, 0.9]:
                 latents = sampler.sample(sample_steps=H.sample_steps, temp=t, guidance=g)
-                
+
                 latents = latents[:10]
                 latents_all.append(latents)
         latents = torch.cat(latents_all, dim=0)
@@ -149,7 +174,7 @@ def get_samples_guidance(H, generator, sampler, x=None):
         for i in range(len(latents)//size):
             latent = latents[i*size : (i+1)*size]
 
-            latent = (latent * 1.0) 
+            latent = (latent * 1.0)
 
             if H.use_tanh:
                 latent = (latent - 0.5) * 2.0
@@ -168,7 +193,7 @@ def get_samples_guidance(H, generator, sampler, x=None):
 
 @torch.no_grad()
 def get_t2i_samples_guidance(H, generator, sampler, label, x=None,):
-    
+
     if isinstance(label, list):
         batch_size = label[0].shape[0]
     else:
@@ -182,7 +207,7 @@ def get_t2i_samples_guidance(H, generator, sampler, label, x=None,):
         for g in [None, 0.1, 0.5, 1.0, 3.0, 10.0]:
             for t in [0.6, 1.0]:
                 latents = sampler.sample(sample_steps=H.sample_steps, b=batch_size, temp=t, label=label, guidance=g)
-                
+
                 latents_all.append(latents)
         latents = torch.cat(latents_all, dim=0)
         sampler.train()
@@ -197,7 +222,7 @@ def get_t2i_samples_guidance(H, generator, sampler, label, x=None,):
         for i in range(len(latents)//size):
             latent = latents[i*size : (i+1)*size]
 
-            latent = (latent * 1.0) 
+            latent = (latent * 1.0)
 
             if H.use_tanh:
                 latent = (latent - 0.5) * 2.0
@@ -238,7 +263,7 @@ def get_online_samples(H, generator, sampler, x=None,):
         for i in range(len(latents)//size):
             latent = latents[i*size : (i+1)*size]
 
-            latent = (latent * 1.0) 
+            latent = (latent * 1.0)
 
             if H.use_tanh:
                 latent = (latent - 0.5) * 2.0
@@ -282,7 +307,7 @@ def get_online_samples_with_shape(H, generator, sampler, x=None, shape=None):
         for i in range(len(latents)//size):
             latent = latents[i*size : (i+1)*size]
 
-            latent = (latent * 1.0) 
+            latent = (latent * 1.0)
 
             if H.use_tanh:
                 latent = (latent - 0.5) * 2.0
@@ -306,7 +331,7 @@ def get_online_samples_with_noisy_code(H, generator, sampler, x_noisy_code=None,
     sampler.eval()
 
     print('Sampling')
- 
+
     latents = sampler.sample(x_noisy_code, noise_t)
 
     latents_all.append(latents)
@@ -323,7 +348,7 @@ def get_online_samples_with_noisy_code(H, generator, sampler, x_noisy_code=None,
         for i in range(len(latents)//size):
             latent = latents[i*size : (i+1)*size]
 
-            latent = (latent * 1.0) 
+            latent = (latent * 1.0)
 
             if H.use_tanh:
                 latent = (latent - 0.5) * 2.0
@@ -343,7 +368,7 @@ def get_online_samples_with_noisy_code(H, generator, sampler, x_noisy_code=None,
 def get_online_samples_denoise_code(sampler, x_noisy_code=None, noise_t=63):
 
     sampler.eval()
- 
+
     denoised_code = sampler.sample(x_noisy_code, noise_t)
 
     sampler.train()
@@ -352,7 +377,7 @@ def get_online_samples_denoise_code(sampler, x_noisy_code=None, noise_t=63):
 
 @torch.no_grad()
 def get_online_decode_code_into_images(latent, generator, H):
-        latent = (latent * 1.0) 
+        latent = (latent * 1.0)
 
         if H.use_tanh:
             latent = (latent - 0.5) * 2.0
@@ -380,7 +405,7 @@ def get_t2i_samples_guidance_test(H, generator, sampler, label, x=None, g=None, 
         print('Sampling')
         t0 = time.time()
         latents = sampler.sample(sample_steps=H.sample_steps, b=batch_size, temp=t, label=label, guidance=g)
-        
+
         latents_all.append(latents)
         latents = torch.cat(latents_all, dim=0)
 
@@ -397,7 +422,7 @@ def get_t2i_samples_guidance_test(H, generator, sampler, label, x=None, g=None, 
         for i in range(len(latents)//size):
             latent = latents[i*size : (i+1)*size]
 
-            latent = (latent * 1.0) 
+            latent = (latent * 1.0)
 
             if H.use_tanh:
                 latent = (latent - 0.5) * 2.0
@@ -442,7 +467,7 @@ def get_online_samples_guidance(H, generator, sampler, x=None,):
         for i in range(len(latents)//size):
             latent = latents[i*size : (i+1)*size]
 
-            latent = (latent * 1.0) 
+            latent = (latent * 1.0)
 
             if H.use_tanh:
                 latent = (latent - 0.5) * 2.0

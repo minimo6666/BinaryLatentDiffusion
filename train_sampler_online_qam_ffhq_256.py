@@ -33,16 +33,15 @@ def main(H, vis):
 
     Eb_N0_db_range = torch.tensor([H.snr_range[0], H.snr_range[1]])
 
-    Eb_N0_dB_value = torch.linspace(Eb_N0_db_range[1], Eb_N0_db_range[0], 64)   
+    Eb_N0_dB_value = torch.linspace(Eb_N0_db_range[1], Eb_N0_db_range[0], 64)
 
     #ldm ae
     ldm_ae_dir = "./ldm/models/ldm/ffhq256"
-    # ckpt = "./ldm/models/ldm/ffhq256/model.ckpt"
     base_configs = sorted(glob.glob(os.path.join(ldm_ae_dir, "config.yaml")))
 
     configs = [OmegaConf.load(cfg) for cfg in base_configs]
     config = configs[0]
- 
+
     # model
 
     ae_state_dict = retrieve_autoencoder_components_state_dicts(
@@ -54,8 +53,15 @@ def main(H, vis):
     bergan = BinaryAutoEncoder(H)
     bergan.load_state_dict(ae_state_dict, strict=True)
     bergan = bergan.cuda()
-    del ae_state_dict
 
+    # =========================================================================
+    # 🌟🌟🌟 新增：显式开启 Eval 并完全冻结 BAE 所有参数，防止反向传播耗费多余显存 🌟🌟🌟
+    # =========================================================================
+    bergan.eval()
+    for param in bergan.parameters():
+        param.requires_grad = False
+
+    del ae_state_dict
 
     sampler = get_sampler(H, None).cuda()
 
@@ -85,7 +91,7 @@ def main(H, vis):
         device = sampler.device
         sampler = load_model(sampler, H.sampler, H.load_model_step, H.load_model_dir, device=device).cuda()
 
-        
+
     scaler = NativeScalerWithGradNormCount(H.amp, H.init_scale)
 
     if H.load_step > 0:
@@ -96,13 +102,12 @@ def main(H, vis):
         allow_mismatch = H.allow_mismatch
         sampler = load_model(sampler, H.sampler, H.load_step, H.load_dir, device=device, allow_mismatch=allow_mismatch).cuda()
         if H.ema:
-            # if EMA has not been generated previously, recopy newly loaded model
             try:
                 ema_sampler = load_model(
                     ema_sampler, f'{H.sampler}_ema', H.load_step, H.load_dir, device=device, allow_mismatch=allow_mismatch)
             except Exception:
                 ema_sampler = copy.deepcopy(sampler_without_ddp)
-        
+
         if not allow_mismatch:
             if H.load_optim:
                 optim = load_model(
@@ -123,7 +128,7 @@ def main(H, vis):
         else:
             H.load_step = 0
 
-        
+
         if train_stats is not None:
             losses, mean_losses, val_losses, elbo, H.steps_per_log
 
@@ -144,9 +149,7 @@ def main(H, vis):
 
         if H.reset_step:
             start_step = 0
-    
-  
-    
+
     train_dataset = instantiate_from_config(config.data.params.train)
     val_dataset = instantiate_from_config(config.data.params.validation)
 
@@ -160,7 +163,7 @@ def main(H, vis):
             val_dataset, num_replicas=num_tasks, rank=global_rank, shuffle=False
         )
         print("Sampler_train = %s" % str(sampler_train))
-            
+
     else:
         sampler_train = torch.utils.data.RandomSampler(train_dataset)
         sampler_val = torch.utils.data.SequentialSampler(val_dataset)
@@ -182,7 +185,6 @@ def main(H, vis):
             drop_last=False,
         )
 
-    # for step in range(start_step, H.train_steps):
     H.train_steps = H.train_steps * H.update_freq
     H.warmup_iters = H.warmup_iters * H.update_freq
     H.steps_per_log = H.steps_per_log * H.update_freq
@@ -203,8 +205,7 @@ def main(H, vis):
             adjust_lr(optim, lr_sched, step)
             step_start_time = time.time()
             #[b,64,64,3]
-            img = data["image"].cuda() 
-            #TODO 归一化到0-1
+            img = data["image"].cuda()
             img = img / 255.0
             img = img.permute(0, 3, 1, 2)
 
@@ -214,8 +215,10 @@ def main(H, vis):
                 x = code.view(b,c,-1).permute(0,2,1).contiguous()
 
             with torch.cuda.amp.autocast(enabled=H.amp):
-             
-                stats = sampler(x)
+                # =========================================================================
+                # 🌟🌟🌟 新增：将原图 (img) 和冻结的 BAE (bergan) 喂入去噪网络 🌟🌟🌟
+                # =========================================================================
+                stats = sampler(x, gt_img=img, ae=bergan)
                 loss = stats['loss']
                 loss = loss / H.update_freq
 
@@ -250,12 +253,11 @@ def main(H, vis):
                     mean_losses = np.append(mean_losses, mean_loss)
                     losses = np.array([])
 
+                    # 这里会自动打印字典里新增的 semantic_loss
                     log_stats(step, stats)
 
                 if step % H.steps_per_save_output == 0:
-                 
-                    # TODO add noise to validate image encoded latent code x_0 into x_t, pass in start t
-                    # 取val_loader的第一个batch
+
                     val_data = next(iter(val_loader))
                     val_img = val_data["image"].cuda()
                     val_img = val_img / 255.0
@@ -265,17 +267,15 @@ def main(H, vis):
                         code_val = bergan(val_img, code_only=True).detach()
                         b,c,h,w = code_val.shape
                         x_val = code_val.view(b,c,-1).permute(0,2,1).contiguous()
-                    
+
                     noise_t = 63
-                    
-                    #gray code qam noise has been added inside make_code_noise
+
                     eb_n0_db = Eb_N0_dB_value[noise_t]
                     x_val_noisy_code_t = make_code_noise(x_val, eb_n0_db=eb_n0_db, qam_order=H.qam_order, device=x_val.device)
                     x_val_denoised = get_online_samples_denoise_code(ema_sampler if H.ema else sampler, x_val_noisy_code_t, noise_t)
                     images = get_online_decode_code_into_images(x_val_denoised, bergan, H)
 
                     save_images(images, 'samples', step, H.log_dir, H.save_individually)
-                    # save_images(val_img, 'gt', step, H.log_dir, H.save_individually)
 
 
                 if step % H.steps_per_checkpoint == 0 and step > H.load_step:
@@ -296,7 +296,7 @@ def main(H, vis):
                         'steps_per_eval': H.steps_per_eval,
                     }
                     save_stats(H, train_stats, step)
-            
+
             if step == H.train_steps:
                 if dist.get_rank() == 0:
                     print(f"Training complete at step {step}.")

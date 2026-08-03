@@ -13,7 +13,7 @@ def extract(a, t, x_shape):
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
 
-class BinaryDiffusionDSC(nn.Module):
+class BinaryDiffusionDSCWeighted(nn.Module):
     def __init__(self, H, denoise_fn, mask_id):
         super().__init__()
 
@@ -42,31 +42,19 @@ class BinaryDiffusionDSC(nn.Module):
         self.qam_order = H.qam_order
 
         ######################################
-        #gray code qam输入是nature二进制输出还是nature二进制，只不过中间变成symbole之前先变成了gray code，然后加噪声，然后解码的时候已经从gray code变回nature二进制了
-        #所以我们是对用gray code qam编码加噪，再解码之后的引入噪声的自然二进制code进行diffusion去噪。由于BER也是用这个解码后的自然二进制code进行计算的
-        #所以我们训练的时候这里已经是带噪点自然二进制的simulate了。
-        #SNR_dB range
         self.Eb_N0_dB_range = torch.tensor([H.snr_range[0], H.snr_range[1]]) #2024/11/30 [0,15]
-
         self.Eb_N0_dB_values = torch.linspace(self.Eb_N0_dB_range[1], self.Eb_N0_dB_range[0],  self.num_timesteps)
-
         q_errot_t = general_m_qam_ber(self.Eb_N0_dB_values, self.qam_order)
 
         alpha_t = 1 - q_errot_t
 
-        # 计算 gamma_t
-        alpha_t_minus_1 = alpha_t[:-1]  # t-1 的 alpha_t
-        alpha_t_current = alpha_t[1:]   # t 的 alpha_t
+        alpha_t_minus_1 = alpha_t[:-1]
+        alpha_t_current = alpha_t[1:]
 
-        # 根据公式计算 gamma_t
         gammas = (alpha_t_minus_1 - alpha_t_current) / (2 * alpha_t_minus_1 - 1)
-
-        # 为了保持与原始 alpha_t 相同的长度，在开头添加一个零
         gammas = torch.cat((torch.tensor([0.0]), gammas))
 
         register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32))
-
-        # Clear previously registered buffers
         self._buffers.clear()
 
         register_buffer('gammas', gammas)
@@ -75,7 +63,6 @@ class BinaryDiffusionDSC(nn.Module):
 
     def get_q_error_t(self,t):
         return self.q_errot_t[t]
-
 
     def sample_time(self, b, device):
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
@@ -86,15 +73,12 @@ class BinaryDiffusionDSC(nn.Module):
         x_t_in_prob = g_function_symbol(x_0, q_e_t)
         return x_t_in_prob
 
-    # 🌟🌟🌟 修改点：支持接收 gt_img (原图) 和 ae (冻结的 BAE) 🌟🌟🌟
     def _train_loss(self, x_0, label=None, x_ct=None, gt_img=None, ae=None):
         x_0 = x_0 * 1.0
         b, device = x_0.size(0), x_0.device
 
-        # choose what time steps to compute loss at
         t = self.sample_time(b, device)
 
-        # make x noisy and denoise
         if x_ct is None:
             x_t = self.q_sample(x_0, t)
 
@@ -105,7 +89,6 @@ class BinaryDiffusionDSC(nn.Module):
             x_0_hat_logits = self._denoise_fn(idx=x_t_in, label=label, time_steps=t)
         else:
             x_0_hat_logits = self._denoise_fn(x_t_in, time_steps=t)
-
 
         if self.p_flip:
             if self.focal >= 0:
@@ -118,12 +101,34 @@ class BinaryDiffusionDSC(nn.Module):
 
         else:
             if self.focal >= 0:
-                kl_loss = focal_loss(x_0_hat_logits, x_0, self.focal, gamma=self.focal)
+                kl_loss = focal_loss(x_0_hat_logits, x_0, alpha=self.focal, gamma=self.focal)
             else:
                 kl_loss = F.binary_cross_entropy_with_logits(x_0_hat_logits, x_0, reduction='none')
 
         if torch.isinf(kl_loss).max():
             pdb.set_trace()
+
+        # =========================================================================
+        # 🌟🌟🌟 新增：Semantic-Weighted BCE Loss (码本范数加权) 🌟🌟🌟
+        # =========================================================================
+        if ae is not None:
+            with torch.no_grad():
+                # 获取冻结的 BAE 的码本权重矩阵, shape: [codebook_size, emb_dim] (例如 [64, 256])
+                codebook = ae.quantize.embed.weight
+
+                # 计算每个 bit 对应向量的 L2 范数 (即该特征的"语义重要性/能量")
+                norms = torch.norm(codebook, p=2, dim=1) # shape: [64]
+
+                # 归一化权重，使其均值为 1，避免破坏整体 Learning Rate 的平衡
+                bit_weights = norms / norms.mean()
+
+                # 调整形状以匹配 kl_loss 的形状 [Batch, 256, 64]
+                # 我们需要在最后一个维度 (codebook_size) 上进行广播加权
+                bit_weights = bit_weights.view(1, 1, -1)
+
+            # 将基础的 BCE Loss 乘以语义权重
+            kl_loss = kl_loss * bit_weights
+        # =========================================================================
 
         if self.loss_final == 'weighted':
             weight = (1 - (t / self.num_timesteps)).view(-1, 1, 1)
@@ -132,35 +137,9 @@ class BinaryDiffusionDSC(nn.Module):
         else:
             raise NotImplementedError
 
-
-        # 记录基础的 BCE loss
+        # 记录加权后的 BCE loss
         kl_loss_mean = kl_loss.mean()
         loss = (weight * kl_loss).mean()
-
-        # =========================================================================
-        # 🌟🌟🌟 新增：Semantic-Aware Soft Loss (语义感知损失) 🌟🌟🌟
-        # =========================================================================
-        semantic_loss_val = 0.0
-        if ae is not None and gt_img is not None:
-            # 1. 获取网络预测的软概率 Soft Probabilities (0 ~ 1) [B, 256, 64]
-            soft_x_0 = torch.sigmoid(x_0_hat_logits)
-
-            # 2. 将其重新排列为 BAE Decoder 期望的维度结构 [B, 64, 16, 16]
-            soft_code = soft_x_0.permute(0, 2, 1).contiguous()
-            soft_code = soft_code.reshape(b, self.codebook_size, self.shape[1], self.shape[2])
-
-            # 3. 软潜变量直接通过冻结的 BAE 前向传播进行解码 (利用其矩阵乘法)
-            pred_img, _, _ = ae(None, code=soft_code)
-
-            # 4. 计算重构图像与 GT 的均方误差 (MSE)
-            semantic_loss = F.mse_loss(pred_img, gt_img)
-
-            # 5. 联合优化：lambda_sem 可调，推荐 1.0 - 5.0，逼迫 Diffusion 死保高权位 bit
-            lambda_sem = 1.0
-            loss = loss + lambda_sem * semantic_loss
-
-            semantic_loss_val = semantic_loss.item()
-        # =========================================================================
 
         with torch.no_grad():
             if self.use_softmax:
@@ -169,20 +148,16 @@ class BinaryDiffusionDSC(nn.Module):
                 acc = (((x_0_hat_logits > 0.0) * 1.0 == x_0) * 1.0).sum() / float(x_0.numel())
 
         if self.aux > 0:
-
             ftr = (((t-1)==0)*1.0).view(-1, 1, 1)
-
             x_0_l = torch.sigmoid(x_0_hat_logits)
             x_0_logits = torch.cat([x_0_l.unsqueeze(-1), (1-x_0_l).unsqueeze(-1)], dim=-1)
-
             x_t_logits = torch.cat([x_t_in.unsqueeze(-1), (1-x_t_in).unsqueeze(-1)], dim=-1)
 
             p_EV_qxtmin_x0 = self.q_sample(x_0_logits, t)
 
-
             gama_t = self.gammas[t]
             dim = x_t_logits.ndim - 1
-            gama_t = gama_t.view(-1, *([1]*dim)) # TODO 替换成DSC的gama_t
+            gama_t = gama_t.view(-1, *([1]*dim))
 
             q_one_step = g_function_binary(x_t_logits, gama_t)
 
@@ -199,29 +174,19 @@ class BinaryDiffusionDSC(nn.Module):
 
             x_tm1_gt = unnormed_gt
 
-            if torch.isinf(x_tm1_logits).max() or torch.isnan(x_tm1_logits).max():
-                pdb.set_trace()
-                # 在计算二元交叉熵时禁用自动混合精度
             with torch.cuda.amp.autocast(enabled=False):
                 aux_loss = F.binary_cross_entropy(x_tm1_logits.clamp(min=1e-6, max=(1.0-1e-6)), x_tm1_gt.clamp(min=0.0, max=1.0), reduction='none')
 
             aux_loss = (weight * aux_loss).mean()
             loss = self.aux * aux_loss + loss
 
-        # 🌟🌟🌟 新增：在 Stats 中记录 semantic_loss，便于监控 🌟🌟🌟
         stats = {'loss': loss, 'bce_loss': kl_loss_mean, 'acc': acc}
-        if ae is not None and gt_img is not None:
-            stats['semantic_loss'] = semantic_loss_val
-
         if self.aux > 0:
             stats['aux loss'] = aux_loss
         return stats
 
-
     def sample(self, x_t = None, t_start=None, return_all=False, temp=1.0):
-        # ... (sample 过程保持不变) ...
         device = 'cuda'
-
         sampling_steps = np.array(range(0, t_start))
 
         if return_all:
@@ -234,10 +199,7 @@ class BinaryDiffusionDSC(nn.Module):
 
             x_0_logits = self._denoise_fn(x_t, time_steps=t)
             x_0_logits = x_0_logits / temp
-                # scale by temperature
-
             x_0_logits = torch.sigmoid(x_0_logits)
-
 
             if self.p_flip:
                 x_0_logits =  x_t * (1 - x_0_logits) + (1 - x_t) * x_0_logits
@@ -261,7 +223,9 @@ class BinaryDiffusionDSC(nn.Module):
                 unnormed_probs = unnormed_probs[...,0]
 
                 x_tm1_logits = unnormed_probs
-                x_tm1_p = torch.bernoulli(x_tm1_logits)
+
+                # 🌟🌟🌟 核心修复：移除 bernoulli 抛硬币，强制使用最大后验概率硬判决 🌟🌟🌟
+                x_tm1_p = (x_tm1_logits > 0.5) * 1.0
 
             else:
                 x_0_logits = x_0_logits
@@ -276,12 +240,8 @@ class BinaryDiffusionDSC(nn.Module):
         else:
             return x_t
 
-
-    # 🌟🌟🌟 修改点：支持接收 gt_img (原图) 和 ae (冻结的 BAE) 🌟🌟🌟
     def forward(self, x, label=None, x_t=None, gt_img=None, ae=None):
         return self._train_loss(x, label, x_t, gt_img=gt_img, ae=ae)
-
-
 
 def focal_loss(inputs, targets, alpha=-1, gamma=1):
     p = torch.sigmoid(inputs)

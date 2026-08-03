@@ -15,7 +15,7 @@ base_dir = "/mnt/data/0/mohao/Project/BLD_DSC/logs/binary_diffusion_ffhq_256_qam
 diffusion_file = os.path.join(base_dir, "diffusion_different_snr_performance/diffusion_psnr_summary.txt")
 jscc_base_dir = os.path.join(base_dir, "jscc_different_snr_performance")
 adaln_metrics_dir = "/mnt/data/0/mohao/Project/BLD_DSC/logs/binary_diffusion_ffhq_256_qam16_snr_0_15_adaln/metrics_results/16QAM"
-pdf_save_dir = os.path.join(base_dir, "pdf")
+pdf_save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "pdf")
 
 os.makedirs(pdf_save_dir, exist_ok=True)
 
