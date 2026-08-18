@@ -1,8 +1,8 @@
 import torch
 import math
 import numpy as np
-import torch
 from scipy.special import erfcinv
+from utils.m_qam_awgn_util import ebn0_db_to_noise_sigma
 
 from scipy.stats import norm
 
@@ -215,46 +215,22 @@ def EbNoDB_toEbNo(EbNoDB):
    return 10 ** (EbNoDB / 10)
 
 #paper: https://faculty.kfupm.edu.sa/ee/naffouri/courses/ee242%20material/Projects/Ronell%20B%20Sicat.pdf
-def Eb_No_dB_to_sigma(Eb_No_dB):    #(maby some error in this formula)
-    
-    d = torch.tensor(1)
+def Eb_No_dB_to_sigma(Eb_No_dB):
+    """Legacy 16-QAM wrapper using the historical unnormalised Es=10 scale."""
+    return Eb_No_dB_to_sigma_in_M_QAM(Eb_No_dB, 16, normalize=False)
 
-    M = torch.tensor(16)
+# https://dsplog.com/2007/09/23/scaling-factor-in-qam/
+def Eb_No_dB_to_sigma_in_M_QAM(Eb_No_dB, qam_order, normalize=True):
+        """Return per-real-dimension sigma for a true Eb/N0 value.
 
-    Eb = torch.tensor(2.5)
-      
-    Eb_N0_linear = 10 ** (Eb_No_dB / 10)
-
-    N0 = Eb / (10 ** (Eb_No_dB / 10))
-
-    sigma = torch.sqrt(N0 / 2)
-
-    return sigma
-
-#https://dsplog.com/2007/09/23/scaling-factor-in-qam/
-def Eb_No_dB_to_sigma_in_M_QAM(Eb_No_dB, qam_order):
-
+        Set normalize=True for the canonical unit-Es constellation. Pass normalize=False only for a legacy unnormalised square-QAM
+        constellation with Es=2(M-1)/3.
         """
-        Calculate the standard deviation (sigma) for AWGN noise addition
-        given SNR in decibels (SNRdB) and QAM order (M).
-
-        Parameters:
-        SNRdB (float): Signal-to-Noise Ratio in decibels.
-        M (int): QAM order.
-
-        Returns:
-        torch.Tensor: Standard deviation sigma.
-        """
-        # Calculate signal power for M-QAM
-        P = 2.0 * (qam_order - 1) / 3.0
-        
-        # Convert SNRdB to linear scale
-        SNR = 10.0 ** (Eb_No_dB / 10.0)
-        
-        # Calculate sigma
-        sigma = torch.sqrt(P / (2.0 * SNR))
-        
-        return sigma
+        symbol_energy = 1.0 if normalize else 2.0 * (qam_order - 1) / 3.0
+        sigma = ebn0_db_to_noise_sigma(Eb_No_dB, qam_order, symbol_energy)
+        reference = torch.as_tensor(Eb_No_dB)
+        dtype = reference.dtype if reference.dtype.is_floating_point else torch.float32
+        return torch.as_tensor(sigma, dtype=dtype, device=reference.device)
 
 
 def Eb_No_dB_to_sigma_bpsk(SNRdB):

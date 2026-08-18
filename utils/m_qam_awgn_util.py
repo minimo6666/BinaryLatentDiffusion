@@ -19,6 +19,45 @@ except Exception:
     TORCH_AVAILABLE = False
 
 # ----------------------------- Common Utilities -----------------------------
+def validate_square_qam_order(M):
+    """Validate Gray-coded square M-QAM and return (levels_per_axis, bits/symbol)."""
+    M = int(M)
+    m = math.isqrt(M)
+    k = int(round(math.log2(M))) if M > 0 else 0
+    if M < 4 or m * m != M or 2**k != M or k % 2:
+        raise ValueError("M must be square power-of-two QAM (4, 16, 64, 256, ...).")
+    return m, k
+
+
+def ebn0_db_to_noise_variance(eb_n0_db, M, symbol_energy=1.0):
+    """Return AWGN variance N0/2 in each real dimension.
+
+    eb_n0_db always means Eb/N0. With k=log2(M) bits per complex symbol,
+    Eb=Es/k and therefore sigma^2=Es/(2*k*10^(Eb/N0/10)).
+    The physical channel in this module uses unit-average-energy symbols.
+    """
+    _, k = validate_square_qam_order(M)
+    gamma_b = 10.0 ** (float(eb_n0_db) / 10.0)
+    return float(symbol_energy) / (2.0 * k * gamma_b)
+
+
+def ebn0_db_to_noise_sigma(eb_n0_db, M, symbol_energy=1.0):
+    """Return the AWGN standard deviation in each real dimension."""
+    return math.sqrt(ebn0_db_to_noise_variance(eb_n0_db, M, symbol_energy))
+
+
+def ebn0_db_to_esn0_db(eb_n0_db, M):
+    """Convert Eb/N0 in dB to Es/N0 in dB for M-QAM."""
+    _, k = validate_square_qam_order(M)
+    return float(eb_n0_db) + 10.0 * math.log10(k)
+
+
+def esn0_db_to_ebn0_db(es_n0_db, M):
+    """Convert Es/N0 in dB to Eb/N0 in dB for M-QAM."""
+    _, k = validate_square_qam_order(M)
+    return float(es_n0_db) - 10.0 * math.log10(k)
+
+
 def _as_numpy_bits(x):
     """Ensure input is a flat 0/1 NumPy int64 array."""
     x = np.asarray(x)
@@ -55,10 +94,7 @@ def bits_to_int_np(bits):
     return (bits * weights).sum(axis=-1).astype(np.int64)
 
 def qam_mod_np(bits, M):
-    m = int(round(math.sqrt(M)))
-    if m * m != M:
-        raise ValueError("M must be a perfect square (e.g., 4, 16, 64).")
-    k = int(round(math.log2(M)))
+    m, k = validate_square_qam_order(M)
     k2 = k // 2
     s = 1.0 / math.sqrt((2.0 / 3.0) * (m**2 - 1))  # Unit average power
     
@@ -79,10 +115,7 @@ def qam_mod_np(bits, M):
     return s * (i_amp.astype(np.float64) + 1j * q_amp.astype(np.float64))
 
 def qam_demod_np(sym, M):
-    m = int(round(math.sqrt(M)))
-    if m * m != M:
-        raise ValueError("M must be a perfect square (e.g., 4, 16, 64).")
-    k = int(round(math.log2(M)))
+    m, k = validate_square_qam_order(M)
     k2 = k // 2
     s = 1.0 / math.sqrt((2.0 / 3.0) * (m**2 - 1))
     invs = 1.0 / s
@@ -105,11 +138,7 @@ def qam_demod_np(sym, M):
     return bits.reshape(-1)
 
 def add_awgn_np(sym, eb_n0_db, M):
-    k = int(round(math.log2(M)))
-    eb_n0 = 10.0 ** (eb_n0_db / 10.0)
-    Eb = 1.0 / k  # since Es=1
-    sigma2 = Eb / (2.0 * eb_n0)
-    sigma = math.sqrt(sigma2)
+    sigma = ebn0_db_to_noise_sigma(eb_n0_db, M)
     noise = sigma * (np.random.randn(*sym.shape) + 1j * np.random.randn(*sym.shape))
     return sym + noise
 
@@ -209,18 +238,18 @@ if TORCH_AVAILABLE:
         bits = torch.cat([i_bits, q_bits], dim=-1).reshape(-1)
         return bits
 
-    def add_awgn_torch(sym, eb_n0_db, M):
-        k = int(round(math.log2(M)))
-        eb_n0 = 10.0 ** (eb_n0_db / 10.0)
-        Eb = 1.0 / k  # Es=1
-        sigma2 = Eb / (2.0 * eb_n0)
-        sigma = math.sqrt(sigma2)
-        noise_real = torch.randn_like(sym.real) * sigma
-        noise_imag = torch.randn_like(sym.imag) * sigma
+    def add_awgn_torch(sym, eb_n0_db, M, generator=None):
+        sigma = ebn0_db_to_noise_sigma(eb_n0_db, M)
+        noise_real = torch.randn(
+            sym.shape, dtype=sym.real.dtype, device=sym.device, generator=generator
+        ) * sigma
+        noise_imag = torch.randn(
+            sym.shape, dtype=sym.imag.dtype, device=sym.device, generator=generator
+        ) * sigma
         noise = torch.complex(noise_real, noise_imag)
         return sym + noise
 
-    def qam_awgn_bits_torch(bits, M, eb_n0_db, device=None):
+    def qam_awgn_bits_torch(bits, M, eb_n0_db, device=None, generator=None):
         bits = _as_torch_bits(bits, device=device)
         k = int(round(math.log2(M)))
         pad = (-bits.numel()) % k
@@ -229,7 +258,7 @@ if TORCH_AVAILABLE:
         else:
             bits_padded = bits
         tx = qam_mod_torch(bits_padded, M, device=device)
-        rx = add_awgn_torch(tx, eb_n0_db, M)
+        rx = add_awgn_torch(tx, eb_n0_db, M, generator=generator)
         z = qam_demod_torch(rx, M)
         return z[:bits.numel()]
 
@@ -254,7 +283,9 @@ def QAM_AWGN_python(n_bits, M, EbN0dB, device=None):
         ber = (z != x).mean()
         return float(ber)
 
-def make_code_noise_single(clean_code, eb_n0_db, qam_order=16, device=None):
+def make_code_noise_single(
+    clean_code, eb_n0_db, qam_order=16, device=None, generator=None
+):
     """
     clean_code: 0/1 tensor/array of ANY shape
     Returns: received_code (same shape), after M-QAM modulation, AWGN, hard-decision demod.
@@ -263,7 +294,9 @@ def make_code_noise_single(clean_code, eb_n0_db, qam_order=16, device=None):
         if device is None:
             device = clean_code.device
         flat = _as_torch_bits(clean_code, device=device)
-        z = qam_awgn_bits_torch(flat, qam_order, eb_n0_db, device=device)
+        z = qam_awgn_bits_torch(
+            flat, qam_order, eb_n0_db, device=device, generator=generator
+        )
         return z.reshape(clean_code.shape).to(dtype=clean_code.dtype, device=device)
     else:
         flat = _as_numpy_bits(clean_code)

@@ -14,7 +14,7 @@ from utils.vqgan_utils import normalize, swish, adopt_weight, hinge_d_loss, calc
 from utils.log_utils import log
 import torch.distributed as dist
 import math
-from utils.qam_utils import Eb_No_dB_to_sigma_in_M_QAM, qam_constellation, mapping, demapping, SNR_dB_to_sigma_in_M_QAM
+from utils.m_qam_awgn_util import make_code_noise_single
 
 def get_image_from_binary_code(generator,  binary_code = None, embedding_weight = None):  # 4月七号测试实值DDPM，即不走输入01code那一套了
     generator.eval()
@@ -103,29 +103,13 @@ class BinaryQuantizerWithoutSampler(nn.Module):
 
         # ... 在主流程中添加噪声的部分修改如下 ...
 
-        sigma_t = SNR_dB_to_sigma_in_M_QAM(self.H.snr, self.H.qam_order).to(device)
-
-        # 确保 symbols 展平
-        code_flatten = code.flatten()
-        constellation = qam_constellation(self.H.qam_order).to(device)
-
-        # Map binary data to QAM constellation symbols (复数)
-        symbols = mapping(code_flatten, constellation, self.H.qam_order)
-
-        # 修复 PyTorch 复数 randn_like 的 Bug
-        # 显式生成与 symbols shape 相同的实数分布
-        noise_real = torch.randn(symbols.shape, dtype=torch.float32, device=device)
-        noise_imag = torch.randn(symbols.shape, dtype=torch.float32, device=device)
-
-        # 组合成复数噪声
-        noise = sigma_t * (noise_real + 1j * noise_imag)
-
-        received_symbols = symbols + noise
-
-        # 后面保持不变
-        noise_binary = demapping(received_symbols, constellation, self.H.qam_order)
-
-        noise_binary = noise_binary.view(shape)
+        # Canonical channel shared with BFM: Gray square QAM, Es=1, Eb/N0.
+        noise_binary = make_code_noise_single(
+            code,
+            eb_n0_db=self.H.snr,
+            qam_order=self.H.qam_order,
+            device=device,
+        ).view(shape)
 
         z_b = noise_binary
 
